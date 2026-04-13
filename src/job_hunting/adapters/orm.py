@@ -26,7 +26,8 @@ job_applications = Table(
     Column("salary_estimated", Boolean, default=False),
     Column("created_at", DateTime, default=datetime.now(timezone.utc)),
     Column("updated_at", DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc)),
-    Column("had_referral", Integer, default=0)
+    Column("had_referral", Integer, default=0),
+    Column("is_active", Boolean, default=True)
 )
 def start_mappers() -> None:
     """Configure SQLAlchemy mappers."""

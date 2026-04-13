@@ -1,77 +1,129 @@
+import logging
+import time
 from datetime import datetime
-from dataclasses import asdict
+from typing import Optional
 
-from flask import Flask, jsonify, request, Response
-from flask_cors import CORS
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
+from job_hunting.logging_config import setup_logging
 from job_hunting.domain import commands
 from job_hunting import bootstrap, views
 from job_hunting.adapters.scraper import JobScraper
 
-app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+setup_logging()
+logger = logging.getLogger("job_hunting.api")
+
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    logger.info("→ %s %s", request.method, request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        logger.exception("Unhandled error during %s %s", request.method, request.url.path)
+        raise
+    duration_ms = (time.perf_counter() - start) * 1000
+    logger.info(
+        "← %s %s  status=%d  %.1fms",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
+
+
 bus = bootstrap.bootstrap()
 
 
-@app.route("/api/jobs/extract", methods=["GET"])
-def extract_job_details() -> tuple[Response, int]:
-    url = request.args.get("url")
+class CreateJobRequest(BaseModel):
+    company: str
+    position: str
+    url: Optional[str] = None
+    status: Optional[str] = "Applied"
+    date_applied: Optional[datetime] = None
+    salary: Optional[float] = None
+    salary_estimated: Optional[bool] = False
+
+
+class UpdateStatusRequest(BaseModel):
+    status: str
+
+
+@app.get("/api/jobs/extract")
+async def extract_job_details(url: Optional[str] = None):
     if not url:
-        return jsonify({"error": "URL parameter is required"}), 400
+        raise HTTPException(status_code=400, detail="URL parameter is required")
 
     try:
         scraper = JobScraper()
         details = scraper.extract_from_url(url)
-        # Using asdict for a simple dataclass
-        return jsonify(details), 200
+        return details
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.route("/api/jobs", methods=["POST"])
-def create_job() -> tuple[Response, int]:
-    data = request.get_json()
+
+@app.post("/api/jobs", status_code=201)
+async def create_job(req: CreateJobRequest):
     cmd = commands.CreateJobApplication(
-        company=data["company"],
-        position=data["position"],
-        url=data.get("url"),
-        status=data.get("status", "Applied"),
-        date_applied=datetime.fromisoformat(data["date_applied"])
-        if data.get("date_applied")
-        else None,
-        salary=data.get("salary"),
-        salary_estimated=data.get("salary_estimated", False),
+        company=req.company,
+        position=req.position,
+        url=req.url,
+        status=req.status,
+        date_applied=req.date_applied,
+        salary=req.salary,
+        salary_estimated=req.salary_estimated,
     )
     bus.handle(cmd)
-    return jsonify("OK"), 201
+    return {"message": "OK"}
 
-@app.route("/api/jobs/<int:job_id>/status", methods=["PUT"])
-def update_job_status(job_id: int) -> tuple[Response, int]:
-    data = request.get_json()
+
+@app.put("/api/jobs/{job_id}")
+async def update_job_status(job_id: int, req: UpdateStatusRequest):
     cmd = commands.UpdateJobApplicationStatus(
         job_id=job_id,
-        status=data["status"]
+        status=req.status,
     )
-    updated_job = bus.handle(cmd)
-    if not updated_job:
-        return jsonify({"message": "Job not found"}), 404
-    return jsonify("OK"), 200
+    try:
+        bus.handle(cmd)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"message": "OK"}
 
 
-@app.route("/api/jobs/<int:job_id>", methods=["DELETE"])
-def delete_job(job_id: int) -> tuple[Response, int]:
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: int):
     cmd = commands.DeleteJobApplication(job_id=job_id)
     bus.handle(cmd)
-    return jsonify("OK"), 200
+    return {"message": "OK"}
 
-@app.route("/api/jobs/<int:job_id>", methods=["GET"])
-def get_job(job_id: int) -> tuple[Response, int]:
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: int):
     result = views.view_job_by_id(job_id, bus.uow)
     if not result:
-        return jsonify({"message": "Job not found"}), 404
-    return jsonify(result), 200
+        raise HTTPException(status_code=404, detail="Job not found")
+    return result
 
-@app.route("/api/jobs", methods=["GET"])
-def get_jobs() -> tuple[Response, int]:
-    query_params = request.args
-    jobs = views.list_jobs(query_params, bus.uow)
-    return jsonify(jobs), 200
+
+@app.get("/api/jobs")
+async def get_jobs(status: Optional[str] = None, search: Optional[str] = None):
+    params: dict[str, str] = {}
+    if status is not None:
+        params["status"] = status
+    if search is not None:
+        params["search"] = search
+
+    jobs = views.list_jobs(params, bus.uow)
+    return jobs

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 from pydantic import BaseModel
+from sqlalchemy.orm import reconstructor
 
 from job_hunting.domain.events import Event
 
@@ -46,6 +47,7 @@ class JobApplication:
     notes: Optional[str] = None
     salary: Optional[int] = None
     salary_estimated: bool = False
+    is_active: bool = True
 
     def __post_init__(self) -> None:
         """Validate and initialize the aggregate."""
@@ -59,6 +61,18 @@ class JobApplication:
 
         if isinstance(self.status, str):
             self.status = JobStatus.from_string(self.status)
+
+    @reconstructor
+    def init_on_load(self):
+        """SQLAlchemy reconstructor: called on ORM object load to initialize
+        non-persistent attributes like `events` that aren't stored in the DB.
+        Without this, instances loaded from the DB won't have `events` and
+        code that expects it (like the unit of work event collector) will
+        raise AttributeError.
+        """
+        # ensure events exists for objects loaded from the DB
+        if not hasattr(self, "events") or self.events is None:
+            self.events = []
 
     def update_status(self, new_status: JobStatus | str) -> None:
         """Update the job application status."""
@@ -84,6 +98,7 @@ class JobApplication:
             "notes": self.notes,
             "salary": self.salary,
             "salary_estimated": self.salary_estimated,
+            "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

@@ -17,7 +17,7 @@ def list_jobs(params: dict[str, str], uow: AbstractUnitOfWork) -> list[dict[str,
         return [job.to_dict() for job in jobs]
 
 
-def view_job_by_id(job_id: int, uow: AbstractUnitOfWork) -> JobApplication | None:
+def view_job_by_id(job_id: int, uow: AbstractUnitOfWork) -> dict[str, dict] | None:
     """Get a specific job application by ID."""
     with uow:
         job = uow.job_applications.get(job_id)

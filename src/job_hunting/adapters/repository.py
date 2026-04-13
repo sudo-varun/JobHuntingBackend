@@ -1,10 +1,13 @@
 import abc
+import logging
+from datetime import datetime, timezone
 from typing import Set, Optional
 
 from sqlalchemy.orm import Session
 
 from job_hunting.domain import model
 
+logger = logging.getLogger(__name__)
 
 class AbstractRepository(abc.ABC):
     def __init__(self):
@@ -25,10 +28,8 @@ class AbstractRepository(abc.ABC):
         self.seen.update(job_applications)
         return job_applications
 
-    def update(self, job_application: model.JobApplication):
-        # For SQLAlchemy, the object is already tracked, so we just need to add it to seen
+    def update(self, job_application: model.JobApplication) -> None:
         self.seen.add(job_application)
-        return job_application
 
     def delete(self, job_id: int) -> None:
         job_application = self._get(job_id)
@@ -71,15 +72,15 @@ class SqlAlchemyRepository(AbstractRepository):
         try:
             return (
                 self.session.query(model.JobApplication)
-                .filter_by(id=job_id)
+                .filter_by(id=job_id, is_active=True)
                 .one_or_none()
             )
         except Exception:
             return None
 
     def _list(self, params: dict[str, str] = None) -> list[model.JobApplication]:
-        query = self.session.query(model.JobApplication)
-        
+        query = self.session.query(model.JobApplication).filter_by(is_active=True)
+        logging.debug("Fetching job applications with params: %s", params)
         if params:
             # Search by company or position (substring match)
             search = params.get("search", "").strip()
@@ -95,7 +96,8 @@ class SqlAlchemyRepository(AbstractRepository):
             # Filter by status (exact match)
             status = params.get("status", "").strip()
             if status and status.lower() != "all":
-                query = query.filter(model.JobApplication.status == status)
+                status_enum = model.JobStatus.from_string(status)
+                query = query.filter(model.JobApplication.status == status_enum)
         
         try:
             return query.all()
@@ -103,4 +105,6 @@ class SqlAlchemyRepository(AbstractRepository):
             return []
 
     def _delete(self, job_application: model.JobApplication) -> None:
-        self.session.delete(job_application)
+        job_application.is_active = False
+        job_application.updated_at = datetime.now(timezone.utc)
+        self.session.add(job_application)
